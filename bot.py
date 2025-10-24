@@ -207,6 +207,7 @@ positions: Dict[str, Dict[str, Any]] = {}  # coin -> position info
 trade_history: List[Dict[str, Any]] = []
 BOT_START_TIME = datetime.now(timezone.utc)
 invocation_count: int = 0
+iteration_counter: int = 0
 ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 current_iteration_messages: List[str] = []
 equity_history: List[float] = []
@@ -366,7 +367,7 @@ def send_telegram_message(text: str) -> None:
 
 def load_state() -> None:
     """Load persisted balance and positions if available."""
-    global balance, positions
+    global balance, positions, iteration_counter
 
     if not STATE_JSON.exists():
         logging.info("No existing state file found; starting fresh.")
@@ -377,6 +378,10 @@ def load_state() -> None:
             data = json.load(f)
 
         balance = float(data.get("balance", START_CAPITAL))
+        try:
+            iteration_counter = int(data.get("iteration", 0))
+        except (TypeError, ValueError):
+            iteration_counter = 0
         loaded_positions = data.get("positions", {})
         if isinstance(loaded_positions, dict):
             restored_positions: Dict[str, Dict[str, Any]] = {}
@@ -427,13 +432,14 @@ def load_state() -> None:
         positions = {}
 
 def save_state() -> None:
-    """Persist current balance and open positions."""
+    """Persist current balance, open positions, and iteration counter."""
     try:
         with open(STATE_JSON, "w") as f:
             json.dump(
                 {
                     "balance": balance,
                     "positions": positions,
+                    "iteration": iteration_counter,
                     "updated_at": datetime.now().isoformat(),
                 },
                 f,
@@ -1373,7 +1379,7 @@ def check_stop_loss_take_profit() -> None:
 
 def main() -> None:
     """Main trading loop."""
-    global current_iteration_messages
+    global current_iteration_messages, iteration_counter
     logging.info("Initializing DeepSeek Multi-Asset Paper Trading Bot...")
     init_csv_files()
     load_equity_history()
@@ -1390,11 +1396,9 @@ def main() -> None:
     else:
         logging.info("Telegram notifications disabled; missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID.")
     
-    iteration = 0
-    
     while True:
         try:
-            iteration += 1
+            iteration_counter += 1
             current_iteration_messages = []
 
             if not get_binance_client():
@@ -1409,7 +1413,7 @@ def main() -> None:
             line = f"\n{Fore.CYAN}{'='*20}"
             print(line)
             record_iteration_message(line)
-            line = f"{Fore.CYAN}Iteration {iteration} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            line = f"{Fore.CYAN}Iteration {iteration_counter} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             print(line)
             record_iteration_message(line)
             line = f"{Fore.CYAN}{'='*20}\n"
@@ -1627,6 +1631,7 @@ def main() -> None:
             
             # Log state
             log_portfolio_state()
+            save_state()
             
             # Wait for next check
             logging.info(f"Waiting {CHECK_INTERVAL} seconds until next check...")
