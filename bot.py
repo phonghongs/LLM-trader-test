@@ -1053,6 +1053,29 @@ def estimate_exit_fee(pos: Dict[str, Any], exit_price: float) -> float:
     estimated_fee = quantity * exit_price * fee_rate_value
     return max(estimated_fee, 0.0)
 
+def format_leverage_display(leverage: Any) -> str:
+    """Return leverage formatted as '<value>x' while handling strings gracefully."""
+    if leverage is None:
+        return "n/a"
+    if isinstance(leverage, str):
+        cleaned = leverage.strip()
+        if not cleaned:
+            return "n/a"
+        if cleaned.lower().endswith('x'):
+            return cleaned.lower()
+        try:
+            value = float(cleaned)
+        except (TypeError, ValueError):
+            return cleaned
+    else:
+        try:
+            value = float(leverage)
+        except (TypeError, ValueError):
+            return str(leverage)
+    if value.is_integer():
+        return f"{int(value)}x"
+    return f"{value:g}x"
+
 def calculate_total_margin() -> float:
     """Return sum of margin allocated across all open positions."""
     return sum(float(pos.get('margin', 0.0)) for pos in positions.values())
@@ -1124,6 +1147,7 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
     
     side = decision.get('side', 'long')
     leverage = decision.get('leverage', 10)
+    leverage_display = format_leverage_display(leverage)
     risk_usd = decision.get('risk_usd', balance * 0.01)
     
     # Calculate position size based on risk
@@ -1185,22 +1209,29 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
     entry_price = current_price
     target_price = decision['profit_target']
     stop_price = decision['stop_loss']
-    is_long = side.lower() == 'long'
 
-    reward_per_unit = (target_price - entry_price) if is_long else (entry_price - target_price)
-    risk_per_unit = (entry_price - stop_price) if is_long else (stop_price - entry_price)
-    expected_reward = max(reward_per_unit * quantity, 0.0)
-    expected_risk = max(risk_per_unit * quantity, 0.0)
+    gross_at_target = calculate_pnl_for_price(positions[coin], target_price)
+    gross_at_stop = calculate_pnl_for_price(positions[coin], stop_price)
+    exit_fee_target = estimate_exit_fee(positions[coin], target_price)
+    exit_fee_stop = estimate_exit_fee(positions[coin], stop_price)
+    net_at_target = gross_at_target - (entry_fee + exit_fee_target)
+    net_at_stop = gross_at_stop - (entry_fee + exit_fee_stop)
+
+    expected_reward = max(gross_at_target, 0.0)
+    expected_risk = max(-gross_at_stop, 0.0)
     if expected_risk > 0:
         rr_value = expected_reward / expected_risk if expected_reward > 0 else 0.0
         rr_display = f"{rr_value:.2f}:1"
     else:
         rr_display = "n/a"
 
-    line = f"{Fore.GREEN}[ENTRY] {coin} {side.upper()} {quantity:.4f} @ ${entry_price:.4f}"
+    line = f"{Fore.GREEN}[ENTRY] {coin} {side.upper()} {leverage_display} @ ${entry_price:.4f}"
     print(line)
     record_iteration_message(line)
-    line = f"  ├─ Leverage: {leverage}x | Margin: ${margin_required:.2f}"
+    line = f"  ├─ Size: {quantity:.4f} {coin} | Margin: ${margin_required:.2f}"
+    print(line)
+    record_iteration_message(line)
+    line = f"  ├─ Risk: ${risk_usd:.2f} | Liquidity: {liquidity}"
     print(line)
     record_iteration_message(line)
     line = f"  ├─ Target: ${target_price:.4f} | Stop: ${stop_price:.4f}"
@@ -1209,10 +1240,23 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
     reason_text = raw_reason or "No justification provided."
     reason_text = " ".join(reason_text.split())
 
-    if expected_reward > 0 or expected_risk > 0:
-        line = f"  ├─ PnL @ Target: +${expected_reward:.2f} | PnL @ Stop: -${expected_risk:.2f}"
-        print(line)
-        record_iteration_message(line)
+    gross_target_sign = '+' if gross_at_target >= 0 else '-'
+    gross_stop_sign = '+' if gross_at_stop >= 0 else '-'
+    net_target_sign = '+' if net_at_target >= 0 else '-'
+    net_stop_sign = '+' if net_at_stop >= 0 else '-'
+
+    line = (
+        f"  ├─ PnL @ Target: {gross_target_sign}${abs(gross_at_target):.2f} "
+        f"(Net: {net_target_sign}${abs(net_at_target):.2f})"
+    )
+    print(line)
+    record_iteration_message(line)
+    line = (
+        f"  ├─ PnL @ Stop: {gross_stop_sign}${abs(gross_at_stop):.2f} "
+        f"(Net: {net_stop_sign}${abs(net_at_stop):.2f})"
+    )
+    print(line)
+    record_iteration_message(line)
     if entry_fee > 0:
         line = f"  ├─ Estimated Fee: ${entry_fee:.2f} ({liquidity} @ {fee_rate*100:.4f}%)"
         print(line)
@@ -1425,6 +1469,10 @@ def main() -> None:
                                 if not existing_reason:
                                     pos['last_justification'] = reason_text
                             try:
+                                quantity = float(pos.get('quantity', 0.0))
+                            except (TypeError, ValueError):
+                                quantity = 0.0
+                            try:
                                 fees_paid = float(pos.get('fees_paid', 0.0))
                             except (TypeError, ValueError):
                                 fees_paid = 0.0
@@ -1440,37 +1488,60 @@ def main() -> None:
                                 stop_price = float(pos.get('stop_loss', entry_price))
                             except (TypeError, ValueError):
                                 stop_price = entry_price
+                            leverage_display = format_leverage_display(pos.get('leverage', 1.0))
                             try:
-                                leverage_value = float(pos.get('leverage', 1.0))
+                                margin_value = float(pos.get('margin', 0.0))
                             except (TypeError, ValueError):
-                                leverage_value = 1.0
-                            leverage_display = f"{leverage_value:g}x"
+                                margin_value = 0.0
+                            try:
+                                risk_value = float(pos.get('risk_usd', 0.0))
+                            except (TypeError, ValueError):
+                                risk_value = 0.0
+
                             gross_unrealized = calculate_unrealized_pnl(coin, current_price)
                             estimated_exit_fee_now = estimate_exit_fee(pos, current_price)
                             total_fees_now = fees_paid + estimated_exit_fee_now
                             net_unrealized = gross_unrealized - total_fees_now
+
                             gross_at_target = calculate_pnl_for_price(pos, target_price)
                             exit_fee_target = estimate_exit_fee(pos, target_price)
                             net_at_target = gross_at_target - (fees_paid + exit_fee_target)
+
                             gross_at_stop = calculate_pnl_for_price(pos, stop_price)
                             exit_fee_stop = estimate_exit_fee(pos, stop_price)
                             net_at_stop = gross_at_stop - (fees_paid + exit_fee_stop)
-                            expected_reward = max(net_at_target, 0.0)
-                            expected_risk = abs(net_at_stop) if net_at_stop < 0 else 0.0
+
+                            expected_reward = max(gross_at_target, 0.0)
+                            expected_risk = max(-gross_at_stop, 0.0)
                             if expected_risk > 0:
                                 rr_value = expected_reward / expected_risk if expected_reward > 0 else 0.0
                                 rr_display = f"{rr_value:.2f}:1"
                             else:
                                 rr_display = "n/a"
+
                             pnl_color = Fore.GREEN if net_unrealized >= 0 else Fore.RED
                             net_sign = '+' if net_unrealized >= 0 else '-'
                             net_display = f"{net_sign}${abs(net_unrealized):.2f}"
                             gross_sign = '+' if gross_unrealized >= 0 else '-'
                             gross_display = f"{gross_sign}${abs(gross_unrealized):.2f}"
-                            target_sign = '+' if net_at_target >= 0 else '-'
-                            stop_sign = '+' if net_at_stop >= 0 else '-'
 
-                            line = f"[HOLD] {coin} {pos['side'].upper()} {leverage_display} @ ${entry_price:.4f}"
+                            gross_target_sign = '+' if gross_at_target >= 0 else '-'
+                            gross_target_display = f"{gross_target_sign}${abs(gross_at_target):.2f}"
+                            gross_stop_sign = '+' if gross_at_stop >= 0 else '-'
+                            gross_stop_display = f"{gross_stop_sign}${abs(gross_at_stop):.2f}"
+
+                            net_target_sign = '+' if net_at_target >= 0 else '-'
+                            net_target_display = f"{net_target_sign}${abs(net_at_target):.2f}"
+                            net_stop_sign = '+' if net_at_stop >= 0 else '-'
+                            net_stop_display = f"{net_stop_sign}${abs(net_at_stop):.2f}"
+
+                            line = (
+                                f"[HOLD] {coin} {pos['side'].upper()} {leverage_display} @ ${entry_price:.4f} | "
+                                f"Current: ${current_price:.4f}"
+                            )
+                            print(line)
+                            record_iteration_message(line)
+                            line = f"  ├─ Size: {quantity:.4f} {coin} | Margin: ${margin_value:.2f}"
                             print(line)
                             record_iteration_message(line)
                             line = f"  ├─ TP: ${target_price:.4f} | SL: ${stop_price:.4f}"
@@ -1483,8 +1554,14 @@ def main() -> None:
                             print(line)
                             record_iteration_message(line)
                             line = (
-                                f"  ├─ PnL @ Target: {target_sign}${abs(net_at_target):.2f} | "
-                                f"PnL @ Stop: {stop_sign}${abs(net_at_stop):.2f}"
+                                f"  ├─ PnL @ Target: {gross_target_display} "
+                                f"(Net: {net_target_display})"
+                            )
+                            print(line)
+                            record_iteration_message(line)
+                            line = (
+                                f"  ├─ PnL @ Stop: {gross_stop_display} "
+                                f"(Net: {net_stop_display})"
                             )
                             print(line)
                             record_iteration_message(line)
