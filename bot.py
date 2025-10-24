@@ -411,6 +411,8 @@ def load_state() -> None:
                     "fees_paid": fees_paid_value,
                     "fee_rate": fee_rate_value,
                     "liquidity": pos.get("liquidity", "taker"),
+                    "entry_justification": pos.get("entry_justification", ""),
+                    "last_justification": pos.get("last_justification", pos.get("entry_justification", "")),
                 }
             positions = restored_positions
         logging.info(
@@ -472,7 +474,7 @@ def register_equity_snapshot(total_equity: float) -> None:
 
 def calculate_rsi_series(close: pd.Series, period: int) -> pd.Series:
     """Return RSI series for specified period using Wilder's smoothing."""
-    delta = close.diff()
+    delta = close.astype(float).diff()
     gain = delta.where(delta > 0, 0.0)
     loss = -delta.where(delta < 0, 0.0)
     alpha = 1 / period
@@ -889,7 +891,7 @@ Return ONLY a valid JSON object with this structure:
     "confidence": 0.75,
     "risk_usd": 500.0,
     "invalidation_condition": "If price closes below X on a 3-minute candle",
-    "justification": "Reason for entry/close"  // only for entry/close
+    "justification": "Reason for entry/close/hold"
   }
 }
 
@@ -1025,6 +1027,32 @@ def calculate_net_unrealized_pnl(coin: str, current_price: float) -> float:
     fees_paid = positions.get(coin, {}).get('fees_paid', 0.0)
     return gross_pnl - fees_paid
 
+def calculate_pnl_for_price(pos: Dict[str, Any], target_price: float) -> float:
+    """Return gross PnL for a hypothetical exit price."""
+    try:
+        quantity = float(pos.get('quantity', 0.0))
+        entry_price = float(pos.get('entry_price', 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+    side = str(pos.get('side', 'long')).lower()
+    if side == 'short':
+        return (entry_price - target_price) * quantity
+    return (target_price - entry_price) * quantity
+
+def estimate_exit_fee(pos: Dict[str, Any], exit_price: float) -> float:
+    """Estimate taker/maker fee required to exit the position at the given price."""
+    try:
+        quantity = float(pos.get('quantity', 0.0))
+    except (TypeError, ValueError):
+        quantity = 0.0
+    fee_rate = pos.get('fee_rate', TAKER_FEE_RATE)
+    try:
+        fee_rate_value = float(fee_rate)
+    except (TypeError, ValueError):
+        fee_rate_value = TAKER_FEE_RATE
+    estimated_fee = quantity * exit_price * fee_rate_value
+    return max(estimated_fee, 0.0)
+
 def calculate_total_margin() -> float:
     """Return sum of margin allocated across all open positions."""
     return sum(float(pos.get('margin', 0.0)) for pos in positions.values())
@@ -1129,6 +1157,7 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
         return
     
     # Open position
+    raw_reason = str(decision.get('justification', '')).strip()
     positions[coin] = {
         'side': side,
         'quantity': quantity,
@@ -1146,7 +1175,9 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
         'wait_for_fill': decision.get('wait_for_fill', False),
         'entry_oid': decision.get('entry_oid', -1),
         'tp_oid': decision.get('tp_oid', -1),
-        'sl_oid': decision.get('sl_oid', -1)
+        'sl_oid': decision.get('sl_oid', -1),
+        'entry_justification': raw_reason,
+        'last_justification': raw_reason,
     }
     
     balance -= total_cost
@@ -1175,6 +1206,9 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
     line = f"  ├─ Target: ${target_price:.4f} | Stop: ${stop_price:.4f}"
     print(line)
     record_iteration_message(line)
+    reason_text = raw_reason or "No justification provided."
+    reason_text = " ".join(reason_text.split())
+
     if expected_reward > 0 or expected_risk > 0:
         line = f"  ├─ PnL @ Target: +${expected_reward:.2f} | PnL @ Stop: -${expected_risk:.2f}"
         print(line)
@@ -1186,7 +1220,10 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
     line = f"  ├─ Confidence: {decision.get('confidence', 0)*100:.0f}%"
     print(line)
     record_iteration_message(line)
-    line = f"  └─ Reward/Risk: {rr_display}"
+    line = f"  ├─ Reward/Risk: {rr_display}"
+    print(line)
+    record_iteration_message(line)
+    line = f"  └─ Reason: {reason_text}"
     print(line)
     record_iteration_message(line)
     
@@ -1199,7 +1236,7 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
         'leverage': leverage,
         'confidence': decision.get('confidence', 0),
         'pnl': 0,
-        'reason': f"{decision.get('justification', 'AI entry signal')} | Fees: ${entry_fee:.2f}"
+        'reason': f"{reason_text or 'AI entry signal'} | Fees: ${entry_fee:.2f}"
     })
     save_state()
 
@@ -1212,6 +1249,10 @@ def execute_close(coin: str, decision: Dict[str, Any], current_price: float) -> 
         return
     
     pos = positions[coin]
+    raw_reason = str(decision.get('justification', '')).strip()
+    reason_text = raw_reason or pos.get('last_justification') or "AI close signal"
+    reason_text = " ".join(reason_text.split())
+    
     pnl = calculate_unrealized_pnl(coin, current_price)
     
     fee_rate = pos.get('fee_rate', TAKER_FEE_RATE)
@@ -1236,6 +1277,9 @@ def execute_close(coin: str, decision: Dict[str, Any], current_price: float) -> 
     line = f"  ├─ Net PnL: ${net_pnl:.2f}"
     print(line)
     record_iteration_message(line)
+    line = f"  ├─ Reason: {reason_text}"
+    print(line)
+    record_iteration_message(line)
     line = f"  └─ Balance: ${balance:.2f}"
     print(line)
     record_iteration_message(line)
@@ -1250,7 +1294,7 @@ def execute_close(coin: str, decision: Dict[str, Any], current_price: float) -> 
         'confidence': 0,
         'pnl': net_pnl,
         'reason': (
-            f"{decision.get('justification', 'AI close signal')} | "
+            f"{reason_text} | "
             f"Gross: ${pnl:.2f} | Fees: ${total_fees:.2f}"
         )
     })
@@ -1370,15 +1414,84 @@ def main() -> None:
                         execute_close(coin, decision, current_price)
                     elif signal == 'hold':
                         if coin in positions:
+                            pos = positions[coin]
+                            raw_reason = str(decision.get('justification', '')).strip()
+                            if raw_reason:
+                                reason_text = " ".join(raw_reason.split())
+                                pos['last_justification'] = reason_text
+                            else:
+                                existing_reason = str(pos.get('last_justification', '')).strip()
+                                reason_text = existing_reason or "No justification provided."
+                                if not existing_reason:
+                                    pos['last_justification'] = reason_text
+                            try:
+                                fees_paid = float(pos.get('fees_paid', 0.0))
+                            except (TypeError, ValueError):
+                                fees_paid = 0.0
+                            try:
+                                entry_price = float(pos.get('entry_price', 0.0))
+                            except (TypeError, ValueError):
+                                entry_price = 0.0
+                            try:
+                                target_price = float(pos.get('profit_target', entry_price))
+                            except (TypeError, ValueError):
+                                target_price = entry_price
+                            try:
+                                stop_price = float(pos.get('stop_loss', entry_price))
+                            except (TypeError, ValueError):
+                                stop_price = entry_price
+                            try:
+                                leverage_value = float(pos.get('leverage', 1.0))
+                            except (TypeError, ValueError):
+                                leverage_value = 1.0
+                            leverage_display = f"{leverage_value:g}x"
                             gross_unrealized = calculate_unrealized_pnl(coin, current_price)
-                            fees_paid = positions[coin].get('fees_paid', 0.0)
-                            net_unrealized = gross_unrealized - fees_paid
+                            estimated_exit_fee_now = estimate_exit_fee(pos, current_price)
+                            total_fees_now = fees_paid + estimated_exit_fee_now
+                            net_unrealized = gross_unrealized - total_fees_now
+                            gross_at_target = calculate_pnl_for_price(pos, target_price)
+                            exit_fee_target = estimate_exit_fee(pos, target_price)
+                            net_at_target = gross_at_target - (fees_paid + exit_fee_target)
+                            gross_at_stop = calculate_pnl_for_price(pos, stop_price)
+                            exit_fee_stop = estimate_exit_fee(pos, stop_price)
+                            net_at_stop = gross_at_stop - (fees_paid + exit_fee_stop)
+                            expected_reward = max(net_at_target, 0.0)
+                            expected_risk = abs(net_at_stop) if net_at_stop < 0 else 0.0
+                            if expected_risk > 0:
+                                rr_value = expected_reward / expected_risk if expected_reward > 0 else 0.0
+                                rr_display = f"{rr_value:.2f}:1"
+                            else:
+                                rr_display = "n/a"
                             pnl_color = Fore.GREEN if net_unrealized >= 0 else Fore.RED
-                            fee_note = f" (Gross: ${gross_unrealized:.2f}, Fees: ${fees_paid:.2f})" if fees_paid else ""
+                            net_sign = '+' if net_unrealized >= 0 else '-'
+                            net_display = f"{net_sign}${abs(net_unrealized):.2f}"
+                            gross_sign = '+' if gross_unrealized >= 0 else '-'
+                            gross_display = f"{gross_sign}${abs(gross_unrealized):.2f}"
+                            target_sign = '+' if net_at_target >= 0 else '-'
+                            stop_sign = '+' if net_at_stop >= 0 else '-'
+
+                            line = f"[HOLD] {coin} {pos['side'].upper()} {leverage_display} @ ${entry_price:.4f}"
+                            print(line)
+                            record_iteration_message(line)
+                            line = f"  ├─ TP: ${target_price:.4f} | SL: ${stop_price:.4f}"
+                            print(line)
+                            record_iteration_message(line)
                             line = (
-                                f"[HOLD] {coin} - Net Unrealized PnL: "
-                                f"{pnl_color}${net_unrealized:.2f}{Style.RESET_ALL}{fee_note}"
+                                f"  ├─ PnL: {pnl_color}{net_display}{Style.RESET_ALL} "
+                                f"(Gross: {gross_display}, Fees: ${total_fees_now:.2f})"
                             )
+                            print(line)
+                            record_iteration_message(line)
+                            line = (
+                                f"  ├─ PnL @ Target: {target_sign}${abs(net_at_target):.2f} | "
+                                f"PnL @ Stop: {stop_sign}${abs(net_at_stop):.2f}"
+                            )
+                            print(line)
+                            record_iteration_message(line)
+                            line = f"  ├─ Reward/Risk: {rr_display}"
+                            print(line)
+                            record_iteration_message(line)
+                            line = f"  └─ Reason: {reason_text}"
                             print(line)
                             record_iteration_message(line)
             
