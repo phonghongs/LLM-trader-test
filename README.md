@@ -4,8 +4,15 @@ This repository contains a paper-trading bot that runs against the Binance REST 
 
 The app persists its runtime data (portfolio state, AI messages, and trade history) inside a dedicated `data/` directory so it can be mounted as a volume when running in Docker.
 
-## This is how it looks when running
-![DeepSeek Trading Bot Dashboard](examples/screenshot.png)
+## Dashboard Preview
+
+The Streamlit dashboard provides real-time monitoring of the trading bot's performance, displaying portfolio metrics, equity curves benchmarked against BTC buy-and-hold, trade history, and AI decision logs.
+
+### DeepSeek Trading Bot Dashboard
+![DeepSeek Trading Bot Dashboard](examples/dashboard.png)
+
+### DeepSeek Trading Bot Console
+![DeepSeek Trading Bot Console](examples/screenshot.png)
 
 ## How It Works
 - Every three minutes the bot fetches fresh candles for `ETH`, `SOL`, `XRP`, `BTC`, `DOGE`, and `BNB`, updates EMA/RSI/MACD indicators, and snapshots current positions.
@@ -107,6 +114,19 @@ docker run --rm -it \
 Then open <http://localhost:8501> to access the UI.
 
 The top-level metrics include Sharpe and Sortino ratios alongside balance, equity, and PnL so you can quickly assess both realised returns and downside-adjusted performance.
+
+## Disclaimer
+
+This repository is provided strictly for experimental and educational purposes. You alone choose how to use it and you bear 100% of the financial risk. I do not offer trading advice, I make no promises of profitability, and I am not responsible for any losses, damages, or missed opportunities that arise from running this project in any environment.
+
+Please keep the following in mind before you deploy anything derived from this code:
+
+- There is no token, airdrop, or fundraising effort associated with this work; if someone claims otherwise, they are not connected to me.
+- The bot does not ship with a complete trading system. Every result depends on your own research, testing, risk controls, and execution discipline.
+- Market conditions change quickly. Past backtests, paper trades, or screenshots are not guarantees of future performance.
+- No LLM, agent, or automated component can remove the inherent risk from trading. Validate everything yourself before real capital is at stake.
+
+By using this repository you acknowledge that you are solely responsible for configuring, auditing, and running it, and that you accept all associated risks.
 
 ## Development Notes
 

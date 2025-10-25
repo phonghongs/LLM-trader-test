@@ -362,6 +362,23 @@ def send_telegram_message(text: str) -> None:
             )
     except Exception as exc:
         logging.error("Error sending Telegram message: %s", exc)
+        
+def notify_error(
+    message: str,
+    metadata: Optional[Dict[str, Any]] = None,
+    *,
+    log_error: bool = True,
+) -> None:
+    """Log an error and forward a brief description to Telegram."""
+    if log_error:
+        logging.error(message)
+    log_ai_message(
+        direction="error",
+        role="system",
+        content=message,
+        metadata=metadata,
+    )
+    send_telegram_message(message)
 
 # ───────────────────────── STATE MGMT ───────────────────────
 
@@ -962,12 +979,12 @@ def call_deepseek_api(prompt: str) -> Optional[Dict[str, Any]]:
         )
 
         if response.status_code != 200:
-            logging.error(f"OpenRouter API error: {response.status_code} - {response.text}")
-            log_ai_message(
-                direction="received",
-                role="system",
-                content=response.text,
-                metadata={"status_code": response.status_code}
+            notify_error(
+                f"OpenRouter API error: {response.status_code}",
+                metadata={
+                    "status_code": response.status_code,
+                    "response_text": response.text,
+                },
             )
             return None
 
@@ -990,25 +1007,36 @@ def call_deepseek_api(prompt: str) -> Optional[Dict[str, Any]]:
         end = content.rfind('}') + 1
         if start != -1 and end > start:
             json_str = content[start:end]
-            decisions = json.loads(json_str)
-            return decisions
+            try:
+                decisions = json.loads(json_str)
+                return decisions
+            except json.JSONDecodeError as decode_err:
+                snippet = json_str[:2000]
+                notify_error(
+                    f"DeepSeek JSON decode failed: {decode_err}",
+                    metadata={
+                        "response_id": result.get("id"),
+                        "status_code": response.status_code,
+                        "raw_json_excerpt": snippet,
+                    },
+                )
+                return None
         else:
-            logging.error("No JSON found in response")
-            log_ai_message(
-                direction="error",
-                role="system",
-                content="No JSON found in response",
-                metadata={"response_id": result.get("id")}
+            notify_error(
+                "No JSON found in DeepSeek response",
+                metadata={
+                    "response_id": result.get("id"),
+                    "status_code": response.status_code,
+                },
             )
             return None
             
     except Exception as e:
-        logging.error(f"Error calling DeepSeek API: {e}", exc_info=True)
-        log_ai_message(
-            direction="error",
-            role="system",
-            content=str(e),
-            metadata={"context": "call_deepseek_api"}
+        logging.exception("Error calling DeepSeek API")
+        notify_error(
+            f"Error calling DeepSeek API: {e}",
+            metadata={"context": "call_deepseek_api"},
+            log_error=False,
         )
         return None
 
