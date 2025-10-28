@@ -1,0 +1,105 @@
+First, I need to check my existing positions and their exit plans. I have positions in ETH, SOL, XRP, BTC, DOGE, and BNB. For each, I must decide to hold or close, based on the invalidation conditions and current market data.
+
+    For ETH: Unrealized PnL is negative. Current price is 4116.05, entry price 4189.12. Stop loss is at 4065.43, and invalidation condition is if price closes below 4000 on a 3-minute candle. Current RSI (7) is 46.761, which is not oversold. EMA20 is 4114.082, close to current price. MACD is positive but decreasing. I should hold unless invalidation triggers. No close below 4000 yet, so hold.
+
+    For SOL: Unrealized PnL is positive. Current price 202.395, entry 198.82. Stop loss at 192.86, invalidation if below 190. RSI (7) is 55.877, neutral. EMA20 is 201.979, price above it. MACD positive. No reason to close, hold.
+
+    For XRP: Unrealized PnL is positive. Current price 2.63725, entry 2.44. Stop loss at 2.325, invalidation if below 2.30. RSI (7) is 35.065, which is oversold, but price is above entry. EMA20 is 2.641, price slightly below. MACD is very small positive. Invalidation not hit, so hold.
+
+    For BTC: Unrealized PnL is positive. Current price 114173.5, entry 107343.0. Stop loss at 102026.675, invalidation if below 105000. RSI (7) is 48.389, neutral. EMA20 is 114151.222, price above. MACD positive but decreasing. No close below 105000, so hold.
+
+    For DOGE: Unrealized PnL is positive. Current price 0.200235, entry 0.18. Stop loss at 0.175355, invalidation if below 0.180. Price is above entry and stop loss. RSI (7) is 37.492, oversold. EMA20 is 0.2, price at it. MACD is 0. No invalidation, so hold.
+
+    For BNB: Unrealized PnL is negative. Current price 1131.55, entry 1140.6. Stop loss at 1083.23, invalidation if below 1080. RSI (7) is 48.474, neutral. EMA20 is 1131.28, price close. MACD positive but decreasing. No close below 1080, so hold.
+
+None of the invalidation conditions are triggered, so I should hold all positions.
+
+Now, for new entries, I need to check if there are any opportunities. I have available cash of 13654.1. But I'm already in all tradable coins: ETH, SOL, XRP, BTC, DOGE, BNB. Since I'm not allowed to pyramid or increase size, I can't enter new positions in these coins. I must only manage existing ones.
+
+The instruction says: "For any coin you manage or want to enter, choose exactly one action". Since I'm already in all, I can only hold or close.
+
+Also, "If a position is open in a coin, the only allowed signals are 'hold' or 'close_position'."
+
+I have positions in all six coins, so I shouldn't be entering any new trades. I need to output JSON for each coin with 'hold' signal.
+
+For each hold, I need to provide the same quantity, profit_target, stop_loss, invalidation_condition, leverage, confidence, risk_usd as per the current position. The account information gives me these details.
+
+Looking at the account info, for each position, I have:
+
+    ETH: quantity 5.74, profit_target 4568.31, stop_loss 4065.43, invalidation_condition 'If the price closes below 4000 on a 3-minute candle', leverage 10, confidence 0.65, risk_usd 722.7846
+
+    SOL: quantity 33.88, profit_target 215.0, stop_loss 192.86, invalidation_condition 'If the price closes below 190 on a 3-minute candle', leverage 10, confidence 0.65, risk_usd 202.07655
+
+    XRP: quantity 3609.0, profit_target 2.815, stop_loss 2.325, invalidation_condition 'If the price closes below 2.30 on a 3-minute candle', leverage 10, confidence 0.65, risk_usd 442.032
+
+    BTC: quantity 0.12, profit_target 118136.15, stop_loss 102026.675, invalidation_condition 'If the price closes below 105000 on a 3-minute candle', leverage 10, confidence 0.75, risk_usd 619.2345
+
+    DOGE: quantity 27858.0, profit_target 0.212275, stop_loss 0.175355, invalidation_condition 'If the price closes below 0.180 on a 3-minute candle', leverage 10, confidence 0.65, risk_usd 257.13
+
+    BNB: quantity 5.64, profit_target 1254.29, stop_loss 1083.23, invalidation_condition 'If the price closes below 1080 on a 3-minute candle', leverage 10, confidence 0.65, risk_usd 321.61725
+
+I need to output a JSON object for each coin with signal 'hold', and include all these details.
+
+The output should be a JSON object with keys for each coin, and under that, "trade_signal_args" with the required fields.
+
+Also, for 'hold', I don't need a justification, as per the example: for hold, the JSON doesn't have "justification" in trade_signal_args. Looking back:
+
+    For entry/exit, there is "justification"
+
+    For close, there is "justification"
+
+    For hold, the example does not have "justification" in trade_signal_args.
+
+Check the example:
+
+If Hold (hold). Supply a json object for each existing position
+
+{
+  "COIN": {
+    "trade_signal_args": {
+      "coin": "COIN",
+      "signal": "hold",
+      "quantity": <full current size>,
+      "profit_target": <float>,
+      "stop_loss": <float>,
+      "invalidation_condition": "<string>",
+      "leverage": <int 5–40>,
+	  "confidence": <0–1>,   
+	  "risk_usd": <float>
+    }
+  }
+}
+
+No "justification" for hold. So I should omit it for hold signals.
+
+For close, it has justification, but since I'm holding, no need.
+
+Now, I need to make sure the quantities and other values are correct as per the current positions.
+
+Also, the confidence and risk_usd are given, so I can use those.
+
+Since I'm not entering any new trades, I only output for the existing coins.
+
+Finally, output a compact JSON object with all six coins.
+
+Let me structure the JSON.
+
+First coin: ETH
+
+{ "ETH": { "trade_signal_args": { "coin": "ETH", "signal": "hold", "quantity": 5.74, "profit_target": 4568.31, "stop_loss": 4065.43, "invalidation_condition": "If the price closes below 4000 on a 3-minute candle", "leverage": 10, "confidence": 0.65, "risk_usd": 722.7846 } } }
+
+Similarly for others.
+
+For BTC, confidence is 0.75, which is higher, but that's fine.
+
+Now, for the output, I need to have one JSON object that includes all these.
+
+So the overall output should be a JSON object with keys "ETH", "SOL", etc., each containing their trade_signal_args.
+
+Like:
+
+{ "ETH": { ... }, "SOL": { ... }, ... }
+
+I think that's it.
+
+No new entries because I'm already in all coins, and no invalidation.

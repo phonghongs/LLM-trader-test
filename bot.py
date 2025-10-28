@@ -11,6 +11,8 @@ import time
 import json
 import logging
 import csv
+import signal
+import sys
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
 from decimal import Decimal
@@ -23,6 +25,8 @@ from requests.exceptions import RequestException, Timeout
 from binance.client import Client
 from dotenv import load_dotenv
 from colorama import Fore, Style, init as colorama_init
+from pydantic import BaseModel, Field, field_validator, ValidationError
+from typing import Literal
 
 colorama_init(autoreset=True)
 
@@ -49,12 +53,47 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 SYMBOLS = ["ETHUSDT", "SOLUSDT", "XRPUSDT", "BTCUSDT", "DOGEUSDT", "BNBUSDT"]
 SYMBOL_TO_COIN = {
     "ETHUSDT": "ETH",
-    "SOLUSDT": "SOL", 
+    "SOLUSDT": "SOL",
     "XRPUSDT": "XRP",
     "BTCUSDT": "BTC",
     "DOGEUSDT": "DOGE",
     "BNBUSDT": "BNB"
 }
+
+# Reverse mapping for O(1) lookups
+COIN_TO_SYMBOL = {v: k for k, v in SYMBOL_TO_COIN.items()}
+
+# ───────────────────── VALIDATION MODELS ──────────────────
+class TradeDecision(BaseModel):
+    """Pydantic model for validating AI trade decisions."""
+    signal: Literal["entry", "close", "hold"]
+    side: Optional[Literal["long", "short"]] = None
+    quantity: Optional[float] = Field(default=None, gt=0)
+    profit_target: Optional[float] = Field(default=None, gt=0)
+    stop_loss: Optional[float] = Field(default=None, gt=0)
+    leverage: Optional[float] = Field(default=1, ge=1, le=125)
+    confidence: Optional[float] = Field(default=0.5, ge=0, le=1)
+    risk_usd: Optional[float] = Field(default=None, ge=0)
+    invalidation_condition: Optional[str] = ""
+    justification: Optional[str] = ""
+    liquidity: Optional[Literal["maker", "taker"]] = "taker"
+    fee_rate: Optional[float] = Field(default=None, ge=0, le=1)
+    wait_for_fill: Optional[bool] = False
+    entry_oid: Optional[int] = -1
+    tp_oid: Optional[int] = -1
+    sl_oid: Optional[int] = -1
+
+    @field_validator("signal")
+    @classmethod
+    def validate_signal_requirements(cls, v, info):
+        """Ensure entry signals have required fields."""
+        if v == "entry":
+            data = info.data
+            required = ["side", "profit_target", "stop_loss"]
+            missing = [f for f in required if not data.get(f)]
+            if missing:
+                raise ValueError(f"Entry signal missing required fields: {missing}")
+        return v
 
 TRADING_RULES_PROMPT = """
 You are a top level crypto trader focused on multiplying the account while safeguarding capital. Always apply these core rules:
@@ -1008,8 +1047,38 @@ def call_deepseek_api(prompt: str) -> Optional[Dict[str, Any]]:
         if start != -1 and end > start:
             json_str = content[start:end]
             try:
-                decisions = json.loads(json_str)
-                return decisions
+                raw_decisions = json.loads(json_str)
+
+                # Validate each coin's decision using Pydantic
+                validated_decisions = {}
+                for coin, decision_data in raw_decisions.items():
+                    try:
+                        validated = TradeDecision(**decision_data)
+                        validated_decisions[coin] = validated.model_dump()
+                    except ValidationError as val_err:
+                        logging.warning(
+                            f"Validation failed for {coin} decision: {val_err}. Skipping this coin."
+                        )
+                        notify_error(
+                            f"Invalid decision for {coin}: {val_err}",
+                            metadata={
+                                "coin": coin,
+                                "raw_decision": decision_data,
+                                "validation_errors": val_err.errors(),
+                            },
+                            log_error=False,
+                        )
+                        continue
+
+                if not validated_decisions:
+                    notify_error(
+                        "No valid decisions after validation",
+                        metadata={"response_id": result.get("id")},
+                    )
+                    return None
+
+                return validated_decisions
+
             except json.JSONDecodeError as decode_err:
                 snippet = json_str[:2000]
                 notify_error(
@@ -1383,7 +1452,10 @@ def execute_close(coin: str, decision: Dict[str, Any], current_price: float) -> 
 def check_stop_loss_take_profit() -> None:
     """Check and execute stop loss / take profit for all positions."""
     for coin in list(positions.keys()):
-        symbol = [s for s, c in SYMBOL_TO_COIN.items() if c == coin][0]
+        symbol = COIN_TO_SYMBOL.get(coin)
+        if not symbol:
+            logging.warning(f"No symbol mapping found for coin {coin}")
+            continue
         data = fetch_market_data(symbol)
         if not data:
             continue
@@ -1405,18 +1477,58 @@ def check_stop_loss_take_profit() -> None:
 
 # ─────────────────────────── MAIN ──────────────────────────
 
+def graceful_shutdown(signum: int, frame: Any) -> None:
+    """Handle graceful shutdown on SIGTERM/SIGINT."""
+    logging.info(f"Received signal {signum}, initiating graceful shutdown...")
+    save_state()
+    logging.info("State saved successfully. Exiting.")
+    sys.exit(0)
+
+def validate_configuration() -> bool:
+    """Validate required configuration at startup."""
+    errors = []
+
+    if not OPENROUTER_API_KEY:
+        errors.append("OPENROUTER_API_KEY not found in environment")
+
+    if not API_KEY or not API_SECRET:
+        errors.append("BN_API_KEY and/or BN_SECRET not found in environment")
+
+    if not SYMBOLS:
+        errors.append("No trading symbols configured")
+
+    if START_CAPITAL <= 0:
+        errors.append(f"Invalid START_CAPITAL: {START_CAPITAL}")
+
+    if CHECK_INTERVAL <= 0:
+        errors.append(f"Invalid CHECK_INTERVAL: {CHECK_INTERVAL}")
+
+    if errors:
+        for error in errors:
+            logging.error(f"Configuration error: {error}")
+        return False
+
+    return True
+
 def main() -> None:
     """Main trading loop."""
     global current_iteration_messages, iteration_counter
+
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGTERM, graceful_shutdown)
+    signal.signal(signal.SIGINT, graceful_shutdown)
+
     logging.info("Initializing DeepSeek Multi-Asset Paper Trading Bot...")
+
+    # Validate configuration
+    if not validate_configuration():
+        logging.error("Configuration validation failed. Exiting.")
+        sys.exit(1)
+
     init_csv_files()
     load_equity_history()
     load_state()
-    
-    if not OPENROUTER_API_KEY:
-        logging.error("OPENROUTER_API_KEY not found in .env file")
-        return
-    
+
     logging.info(f"Starting capital: ${START_CAPITAL:.2f}")
     logging.info(f"Monitoring: {', '.join(SYMBOL_TO_COIN.values())}")
     if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
@@ -1476,7 +1588,10 @@ def main() -> None:
                     )
                     
                     # Get current price
-                    symbol = [s for s, c in SYMBOL_TO_COIN.items() if c == coin][0]
+                    symbol = COIN_TO_SYMBOL.get(coin)
+                    if not symbol:
+                        logging.warning(f"No symbol mapping found for coin {coin}")
+                        continue
                     data = fetch_market_data(symbol)
                     if not data:
                         continue
